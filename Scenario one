@@ -1,1 +1,96 @@
+using JuMP, GLPK, Random, Plots, LinearAlgebra
 
+function make_circle(xc, yc, r; n=100)
+    θ = range(0, 2π; length=n)
+    xs = xc .+ r .* cos.(θ)
+    ys = yc .+ r .* sin.(θ)
+    return Shape(xs, ys)
+end
+
+Random.seed!(1234)
+num_primary = 5
+num_backup = 10
+C = 250.0  # Max. Reichweite Backup → Primär
+A = 50.0   # Min. Abstand Backup ↔ Primär
+B = 100.0  # Min. Abstand Backup ↔ Backup
+
+coords_primary = [(rand()*500, rand()*500) for _ in 1:num_primary]
+coords_backup  = [(rand()*500, rand()*500) for _ in 1:num_backup]
+
+function euclid(p1, p2)
+    sqrt((p1[1] - p2[1])^2 + (p1[2] - p2[2])^2)
+end
+
+djk = [euclid(coords_backup[j], coords_primary[k]) for j in 1:num_backup, k in 1:num_primary]
+dij = [euclid(coords_backup[i], coords_backup[j]) for i in 1:num_backup, j in 1:num_backup]
+
+cjk = [djk[j,k] <= C ? 1 : 0 for j in 1:num_backup, k in 1:num_primary]
+ajk = [djk[j,k] <= A ? 1 : 0 for j in 1:num_backup, k in 1:num_primary]
+bij = [dij[i,j] <= B && i != j ? 1 : 0 for i in 1:num_backup, j in 1:num_backup]
+
+model = Model(GLPK.Optimizer)
+@variable(model, x[1:num_backup], Bin)
+@objective(model, Min, sum(x[j] for j in 1:num_backup))
+
+for k in 1:num_primary
+    @constraint(model, sum(cjk[j,k]*x[j] for j in 1:num_backup) >= 1)
+    @constraint(model, sum(ajk[j,k]*x[j] for j in 1:num_backup) <= 0)
+end
+
+for i in 1:num_backup, j in 1:num_backup
+    if bij[i,j] == 1
+        @constraint(model, x[i] + x[j] <= 1)
+    end
+end
+
+optimize!(model)
+
+println("📍 Primärstandorte (Koordinaten):")
+for (i, (x, y)) in enumerate(coords_primary)
+    println("P$i: (x=$(round(x, digits=1)), y=$(round(y, digits=1)))")
+end
+
+gewählte_backups = []
+println("\n🛠️ Gewählte Backup-Standorte:")
+for j in 1:num_backup
+    if value(x[j]) > 0.5
+        push!(gewählte_backups, j)
+        println("→ Backup B$j wird gebaut bei (x=$(round(coords_backup[j][1], digits=1)), y=$(round(coords_backup[j][2], digits=1)))")
+    end
+end
+
+println("\n🔄 Backup → Primär-Zuordnung:")
+for j in gewählte_backups
+    abgedeckt = [ "P$k" for k in 1:num_primary if cjk[j,k] == 1 ]
+    println("B$j versorgt: ", join(abgedeckt, ", "))
+end
+
+gr()
+scatter([], []; 
+    title="Scenario 1",
+    xlabel="x [m]",
+    ylabel="y [m]",
+    legend=:topright,
+    xlim=(0,500), ylim=(0,500), size=(900,700))
+
+for (i, (x, y)) in enumerate(coords_primary)
+    scatter!([x], [y], color=:blue, markershape=:circle, markersize=6, label=i==1 ? "Primary location" : "")
+    annotate!(x, y, text("P$i", :black, 10))
+    plot!(make_circle(x, y, C), color=:blue, alpha=0.1, linecolor=:blue, label=i==1 ? "Coverage radius (C = 200 m)" : "")
+end
+
+for (j, (xcoord, ycoord)) in enumerate(coords_backup)
+    active = value(x[j]) > 0.5
+    scatter!([xcoord], [ycoord], 
+        color=active ? :red : :gray,
+        markershape=active ? :star5 : :circle, 
+        markersize=7,
+        label=j==1 && active ? "Selected backup" : j==1 && !active ? "Unselected backup" : "")
+    annotate!(xcoord, ycoord, text("B$j", :black, 10))
+end
+
+if !isdir("plots")
+    mkdir("plots")
+end
+savefig("plots/szenario1_plot.png")
+println("\n📷 Grafik gespeichert unter: plots/szenario1_plot.png")
