@@ -1,1 +1,113 @@
+using JuMP, GLPK, Random, Plots, LinearAlgebra
+using MathOptInterface
+const MOI = MathOptInterface
 
+function euclid(p1, p2)
+    sqrt((p1[1] - p2[1])^2 + (p1[2] - p2[2])^2)
+end
+
+function make_circle(xc, yc, r; n=100)
+    θ = range(0, 2π; length=n)
+    xs = xc .+ r .* cos.(θ)
+    ys = yc .+ r .* sin.(θ)
+    return Shape(xs, ys)
+end
+
+function solve_szenario2()
+    num_primary = 6
+    num_backup = 3
+    C = 200.0
+    A = 40.0
+    B = 100.0
+
+    seed = 5678
+    max_attempts = 100
+    attempt = 0
+    status = MOI.INFEASIBLE
+
+    while status != MOI.OPTIMAL && attempt < max_attempts
+        attempt += 1
+        println("Versuch $attempt mit Seed $seed ...")
+
+        Random.seed!(seed)
+        seed += 1
+
+        coords_primary = [(rand()*500, rand()*500) for _ in 1:num_primary]
+        coords_backup  = [(rand()*500, rand()*500) for _ in 1:num_backup]
+
+        djk = [euclid(coords_backup[j], coords_primary[k]) for j in 1:num_backup, k in 1:num_primary]
+        dij = [euclid(coords_backup[i], coords_backup[j]) for i in 1:num_backup, j in 1:num_backup]
+
+        cjk = [djk[j,k] <= C ? 1 : 0 for j in 1:num_backup, k in 1:num_primary]
+        ajk = [djk[j,k] <= A ? 1 : 0 for j in 1:num_backup, k in 1:num_primary]
+        bij = [dij[i,j] <= B && i != j ? 1 : 0 for i in 1:num_backup, j in 1:num_backup]
+
+        model = Model(GLPK.Optimizer)
+        @variable(model, x[1:num_backup], Bin)
+        @objective(model, Min, sum(x[j] for j in 1:num_backup))
+
+        for k in 1:num_primary
+            @constraint(model, sum(cjk[j,k]*x[j] for j in 1:num_backup) >= 1)
+            @constraint(model, sum(ajk[j,k]*x[j] for j in 1:num_backup) <= 0)
+        end
+
+        for i in 1:num_backup, j in 1:num_backup
+            if bij[i,j] == 1
+                @constraint(model, x[i] + x[j] <= 1)
+            end
+        end
+
+        optimize!(model)
+        status = termination_status(model)
+        if status == MOI.OPTIMAL
+            println("Lösung gefunden!")
+            println("📍 Primärstandorte (Koordinaten):")
+            for (i, (x_, y_)) in enumerate(coords_primary)
+                println("P$i: (x=$(round(x_, digits=1)), y=$(round(y_, digits=1)))")
+            end
+
+            gewählte_backups = []
+            println("\n🛠️ Gewählte Backup-Standorte:")
+            for j in 1:num_backup
+                if value(x[j]) > 0.5
+                    push!(gewählte_backups, j)
+                    println("→ Backup B$j wird gebaut bei (x=$(round(coords_backup[j][1], digits=1)), y=$(round(coords_backup[j][2], digits=1)))")
+                end
+            end
+
+            println("\n🔄 Backup → Primär-Zuordnung:")
+            for j in gewählte_backups
+                abgedeckt = [ "P$k" for k in 1:num_primary if cjk[j,k] == 1 ]
+                println("B$j versorgt: ", join(abgedeckt, ", "))
+            end
+
+            gr()
+            scatter([], []; title="Szenario 2: 6 Primär, 3 Backup", legend=false, xlim=(0,500), ylim=(0,500), size=(900,700))
+
+            for (i, (x_, y_)) in enumerate(coords_primary)
+                scatter!([x_], [y_], color=:blue, markershape=:circle, markersize=6)
+                annotate!(x_, y_, text("P$i", :blue, 10))
+                plot!(make_circle(x_, y_, C), color=:blue, alpha=0.1, linecolor=:blue)
+            end
+
+            for (j, (xcoord, ycoord)) in enumerate(coords_backup)
+                active = value(x[j]) > 0.5
+                scatter!([xcoord], [ycoord], color=active ? :red : :gray, markershape=active ? :star5 : :circle, markersize=7)
+                annotate!(xcoord, ycoord, text("B$j", active ? :red : :gray, 10))
+            end
+
+            if !isdir("plots")
+                mkdir("plots")
+            end
+            savefig("plots/szenario2_plot.png")
+            println("\n📷 Grafik gespeichert unter: plots/szenario2_plot.png")
+            return
+        else
+            println("Keine optimale Lösung, Status: $status. Neuer Versuch...")
+        end
+    end
+
+    println("Nach $max_attempts Versuchen keine Lösung gefunden.")
+end
+
+solve_szenario2()
